@@ -53,6 +53,13 @@ natfrp_blob_arch = $(strip \
 	$(if $(filter riscv64%,$(1)),riscv64,\
 	$(if $(filter loongarch64%,$(1)),loong64,))))))))))))
 
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+endef
+
+define Build/Compile
+endef
+
 define Package/natfrp-launcher/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(if $(call natfrp_blob_arch,$(ARCH)),,$(error 未支持的架构 "$(ARCH)"，请在 blobs/ 下放置二进制))

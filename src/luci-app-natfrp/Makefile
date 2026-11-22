@@ -33,6 +33,13 @@ define Package/luci-app-natfrp/conffiles
 /etc/config/natfrp
 endef
 
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+endef
+
+define Build/Compile
+endef
+
 define Package/luci-app-natfrp/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/natfrp
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/natfrp/main.js \
