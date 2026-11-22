@@ -40,18 +40,13 @@ endef
 
 # 发布包使用的架构名。
 # 用 $(call) 在 install 展开时求值：解析阶段 $(ARCH) 可能还没定义。
-# 参数允许带 ABI 后缀（如 aarch64_cortex-a53），按前缀匹配。
-natfrp_blob_arch = $(strip \
-	$(if $(filter aarch64%,$(1)),arm64,\
-	$(if $(filter arm%,$(1)),armv7,\
-	$(if $(filter x86_64%,$(1)),amd64,\
-	$(if $(filter i386% i686%,$(1)),386,\
-	$(if $(filter mipsel%,$(1)),mipsle,\
-	$(if $(filter mips64el%,$(1)),mips64le,\
-	$(if $(filter mips64%,$(1)),mips64,\
-	$(if $(filter mips%,$(1)),mips,\
-	$(if $(filter riscv64%,$(1)),riscv64,\
-	$(if $(filter loongarch64%,$(1)),loong64,))))))))))))
+# 参数允许带 ABI 后缀（如 aarch64_cortex-a53），按子串匹配，顺序即优先级。
+NATFRP_ARCH_MAP := aarch64:arm64 arm:armv7 x86_64:amd64 i386:386 i686:386 \
+	mipsel:mipsle mips64el:mips64le mips64:mips64 mips:mips riscv64:riscv64 \
+	loongarch64:loong64
+
+natfrp_blob_arch = $(firstword $(foreach e,$(NATFRP_ARCH_MAP),\
+	$(if $(findstring $(word 1,$(subst :, ,$(e))),$(1)),$(word 2,$(subst :, ,$(e))))))
 
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
