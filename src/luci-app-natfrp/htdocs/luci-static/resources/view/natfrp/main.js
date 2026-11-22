@@ -15,8 +15,11 @@
  */
 
 var CTL = '/usr/bin/natfrpctl';
+/* 只读入口：status 不含口令，因此只读账号也能安全轮询 */
+var CTL_RO = '/usr/bin/natfrpctl-status';
 var REMOTE_URL = 'https://www.natfrp.com/remote/v2';
-var POLL_INTERVAL = 5;
+/* 状态轮询间隔。status 会 fork pidof/uci，5 秒一轮在小内存设备上过于频繁 */
+var POLL_INTERVAL = 15;
 
 /*
  * hero 样式内联下发，避免额外请求与主题缓存问题。
@@ -62,8 +65,21 @@ function parseJson(raw) {
 }
 
 function readStatus() {
-	return fs.exec(CTL, [ 'status' ]).then(function (res) {
+	return fs.exec(CTL_RO, [ 'status' ]).then(function (res) {
 		return parseJson(res ? String(res.stdout || '').trim() : '');
+	}).catch(function () {
+		return null;
+	});
+}
+
+/*
+ * 口令单独取：status 不返回明文，只读会话拿不到 secrets，此时页面隐藏口令而不是报错。
+ * 返回值：{ webui_pass, remote_pass }，无权限或失败时为 null。
+ */
+function readSecrets() {
+	return fs.exec(CTL, [ 'secrets' ]).then(function (res) {
+		var data = parseJson(res ? String(res.stdout || '').trim() : '');
+		return (data && data.ok === true) ? data : null;
 	}).catch(function () {
 		return null;
 	});
@@ -132,11 +148,12 @@ function copyText(text) {
 
 return view.extend({
 	load: function () {
-		return Promise.all([ readStatus(), uci.load('natfrp') ]);
+		return Promise.all([ readStatus(), readSecrets(), uci.load('natfrp') ]);
 	},
 
 	render: function (data) {
 		var status = (data && data[0]) || null;
+		var secrets = (data && data[1]) || null;
 		var m, s, o;
 
 		this.badgeEl = null;
@@ -178,13 +195,26 @@ return view.extend({
 			return (value.length >= 8) || _('密码至少需要 8 个字符');
 		};
 
+		o = s.option(form.Flag, 'remote_allow_config', _('允许远程修改配置'),
+			_('远程管理连接建立后，是否允许从服务端网页改写本机启动器配置。关掉更安全。'));
+		o.rmempty = false;
+		o.default = '1';
+		o.depends('remote_mgmt', '1');
+
+		o = s.option(form.Flag, 'remote_allow_update', _('允许远程触发更新'),
+			_('远程管理连接建立后，是否允许从服务端网页触发本机启动器更新。关掉更安全。'));
+		o.rmempty = false;
+		o.default = '1';
+		o.depends('remote_mgmt', '1');
+
 		o = s.option(form.Flag, 'webui', _('启用 WebUI'),
 			_('在本机启动启动器自带的图形界面，可独立于服务端使用。'));
 		o.rmempty = false;
 		o = s.option(form.Flag, 'webui_tls', _('使用 TLS（HTTPS）'),
-			_('关闭后页面以明文 HTTP 提供，浏览器不再提示自签名证书；口令随之明文传输，仅建议在可信内网使用。'));
+			_('默认开启：自签名证书，可在下方「下载证书」导入信任。关闭后页面以明文 HTTP 提供，' +
+				'口令与登录过程都不加密，仅建议在可信内网使用。'));
 		o.rmempty = false;
-		o.default = '0';
+		o.default = '1';
 		o.depends('webui', '1');
 
 		o = s.option(form.Value, 'webui_port', _('监听端口'));
@@ -198,7 +228,15 @@ return view.extend({
 			if (!/^\d+$/.test(value))
 				return _('端口必须是数字');
 			var port = parseInt(value, 10);
-			return (port >= 1 && port <= 65535) || _('端口范围是 1-65535');
+			if (port < 1 || port > 65535)
+				return _('端口范围是 1-65535');
+
+			/* 关闭 TLS 时，明文入口与守护进程各占一个端口（后者的内部端口是 port+1000），
+			   端口太小时偏移量无处可用，两者会抢同一端口 */
+			var tls = uci.get('natfrp', 'main', 'webui_tls');
+			if (tls === '0' && port <= 1000)
+				return _('关闭 TLS 时端口需大于 1000（1000 以内没有空间让守护进程避开明文入口）');
+			return true;
 		};
 
 		o = s.option(form.Value, 'webui_host', _('监听地址'),
@@ -237,7 +275,7 @@ return view.extend({
 
 		var card = this.renderCard();
 
-		this.updateCard(status);
+		this.updateCard(status, secrets);
 
 		var self = this;
 		poll.add(function () {
@@ -354,21 +392,25 @@ return view.extend({
 			this.remoteCopyBtn
 		]);
 
-		this.heroEl = E('div', { 'class': 'nf-hero', 'id': 'natfrp-card' }, [ body, foot, this.remoteRow ]);
+		this.cfgErrEl = E('div', { 'class': 'nf-hero-foot', 'style': 'display:none;color:#b3261e' }, '');
+
+		this.heroEl = E('div', { 'class': 'nf-hero', 'id': 'natfrp-card' },
+			[ this.cfgErrEl, body, foot, this.remoteRow ]);
 
 		return this.heroEl;
 	},
 
-	updateCard: function (st) {
+	updateCard: function (st, sec) {
 		if (!this.heroEl)
 			return;
 
 		var running = !!(st && st.running);
 		var webui = (st && st.webui) || {};
 		var remote = (st && st.remote) || {};
+		var secretsOk = (sec !== null && sec !== undefined);
 
 		var port = parseInt(webui.port, 10) || 0;
-		var password = webui.password || '';
+		var password = (sec && sec.webui_pass) || '';
 		var webuiReady = !!(webui.enabled && port > 0);
 		var remoteReady = !!(remote.enabled && remote.keyed);
 		var localUrl = webuiReady
@@ -384,7 +426,19 @@ return view.extend({
 		this.pidEl.textContent = (st && st.pid) ? ('PID ' + st.pid) : '';
 		this.verEl.textContent = (st && st.version) ? ('v' + st.version) : _('版本未知');
 		this.bootEl.textContent = (st && st.enabled) ? _('开机自启') : _('未开机自启');
-		this.passEl.textContent = password || _('未设置');
+		if (st && st.config_error) {
+			this.cfgErrEl.style.display = '';
+			this.cfgErrEl.textContent = _('配置文件读取失败：%s').format(st.config_error);
+		}
+		else {
+			this.cfgErrEl.style.display = 'none';
+			this.cfgErrEl.textContent = '';
+		}
+
+		if (!secretsOk)
+			this.passEl.textContent = _('需要写权限');
+		else
+			this.passEl.textContent = password || _('未设置');
 
 		/* 主入口自动选目标：远程管理配好就走 natfrp 的远程页面，
 		   否则打开本机 WebUI；都没配好时置灰。 */
@@ -407,9 +461,15 @@ return view.extend({
 		}
 
 		if (remoteReady) {
-			this.hintEl.textContent = running
+			var caps = [];
+			if (remote.allow_config === false)
+				caps.push(_('禁止改配置'));
+			if (remote.allow_update === false)
+				caps.push(_('禁止触发更新'));
+			this.hintEl.textContent = (running
 				? _('跳到 natfrp 远程管理页，用下方的远程管理密码连接。')
-				: _('启动器未运行，远程管理需要服务在线。');
+				: _('启动器未运行，远程管理需要服务在线。'))
+				+ (caps.length ? ' ' + _('当前已限制：%s。').format(caps.join('、')) : '');
 		}
 		else if (webuiReady) {
 			this.hintEl.textContent = running
@@ -430,8 +490,10 @@ return view.extend({
 		this.certBtn.style.display = webuiReady ? '' : 'none';
 
 		this.remoteRow.style.display = remote.enabled ? '' : 'none';
-		this.remotePassEl.textContent = remote.password || _('未保存');
-		if (remote.password)
+		this.remotePassEl.textContent = secretsOk
+			? ((sec && sec.remote_pass) || _('未保存'))
+			: _('需要写权限');
+		if (secretsOk && sec && sec.remote_pass)
 			this.remoteCopyBtn.removeAttribute('disabled');
 		else
 			this.remoteCopyBtn.setAttribute('disabled', 'disabled');

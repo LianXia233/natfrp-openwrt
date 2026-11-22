@@ -1,4 +1,4 @@
-// 校验 src/natfrpctl/src/inject.js 里的 WebCrypto 兼容层：
+// 校验 rust/inject.js 里的 WebCrypto 兼容层：
 // 用它算出的 HMAC-SHA256 必须与 Node 的 crypto 完全一致。
 
 const crypto = require('node:crypto');

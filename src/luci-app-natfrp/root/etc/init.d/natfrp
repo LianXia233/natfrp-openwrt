@@ -62,11 +62,27 @@ reload_service() {
 	start
 }
 
-# 关闭 WebUI TLS 时，明文入口由 natfrpctl relay 提供
+# 关闭 WebUI TLS 时，明文入口由 natfrpctl relay 提供。
+# 注意 webui_tls 缺失时按「开启 TLS」处理：老配置没有这个键，若按 0 处理，
+# natfrpctl 会把守护进程挪到回环上，而这里又不启动 relay，页面就彻底打不开了。
 start_relay() {
+	tls=${CONFIG_main_webui_tls:-1}
+	port=${CONFIG_main_webui_port:-4101}
+
 	[ "$CONFIG_main_enabled" = "1" ] || return
 	[ "$CONFIG_main_webui" = "1" ] || return
-	[ "$CONFIG_main_webui_tls" = "0" ] || return
+	[ "$tls" = "0" ] || return
+
+	# 明文入口与守护进程各占一个端口，端口太小时偏移量无处可用，两者会抢同一端口
+	if [ "$port" -le 1000 ] 2>/dev/null; then
+		log_err "webui_port=$port 太小的端口无法容纳明文入口（需大于 1000）"
+		return 1
+	fi
+
+	# relay 靠 openssl s_client 把 HTTPS 转成 HTTP；缺这个命令行时每条连接都会静默断开
+	if [ ! -x /usr/bin/openssl ]; then
+		log_err "缺少 /usr/bin/openssl（请安装 openssl-util），明文 WebUI 无法工作；可改用 WebUI TLS"
+	fi
 
 	procd_open_instance "webui-http"
 	procd_set_param respawn

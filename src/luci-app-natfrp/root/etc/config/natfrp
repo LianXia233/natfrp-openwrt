@@ -1,9 +1,14 @@
 config natfrp 'main'
 	option enabled '0'
 	option remote_mgmt '1'
+	option remote_allow_config '1'
+	option remote_allow_update '1'
 
 	# WebUI 默认对外（LAN）监听，端口用启动器的常规端口
 	option webui '1'
 	option webui_host '0.0.0.0'
 	option webui_port '4101'
-	option webui_tls '0'
+
+	# 默认走 HTTPS（自签名证书，页面提供「下载证书」按钮）；
+	# 改成 0 会切换成明文入口，口令将以明文传输，仅建议在可信内网使用。
+	option webui_tls '1'

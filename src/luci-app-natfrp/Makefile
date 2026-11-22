@@ -32,7 +32,8 @@ define Package/luci-app-natfrp
   CATEGORY:=Network
   TITLE:=SakuraFrp launcher with LuCI page
   URL:=https://www.natfrp.com/
-  DEPENDS:=@(aarch64||arm||x86_64||i386)
+  # luci-base: 页面用到 form/fs/uci；openssl-util: 关闭 WebUI TLS 时明文入口靠 s_client 转发
+  DEPENDS:=+luci-base +openssl-util @(aarch64||arm||x86_64||i386)
 endef
 
 define Package/luci-app-natfrp/description
@@ -42,6 +43,16 @@ endef
 
 define Package/luci-app-natfrp/conffiles
 /etc/config/natfrp
+endef
+
+# 首次安装 / 升级后清掉 LuCI 缓存并让 rpcd 重新加载 ACL，
+# 否则菜单与权限要等一次重启或重新登录才生效。
+define Package/luci-app-natfrp/postinst
+#!/bin/sh
+rm -f /tmp/luci-indexcache.* 2>/dev/null
+rm -rf /tmp/luci-modulecache 2>/dev/null
+/etc/init.d/rpcd restart >/dev/null 2>&1 || true
+exit 0
 endef
 
 define Build/Prepare
@@ -58,6 +69,8 @@ define Package/luci-app-natfrp/install
 	$(INSTALL_BIN) ./files/blobs/$(call natfrp_blob_arch,$(ARCH))/natfrp-service $(1)/usr/bin/natfrp-service
 	$(INSTALL_BIN) ./files/blobs/$(call natfrp_blob_arch,$(ARCH))/natfrp-frpc $(1)/usr/bin/natfrp-frpc
 	$(INSTALL_BIN) ./files/natfrpctl-$(ARCH) $(1)/usr/bin/natfrpctl
+	# 只读入口：只允许 status/version，供 read ACL 单独授权
+	$(INSTALL_BIN) ./root/usr/bin/natfrpctl-status $(1)/usr/bin/natfrpctl-status
 
 	# LuCI 页面
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/natfrp

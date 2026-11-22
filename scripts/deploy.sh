@@ -7,14 +7,15 @@
 #   - SSH 密钥（推荐，直接 ssh 即可）
 #   - SSH_ASKPASS 脚本（export SSH_ASKPASS=/path/to/askpass）
 #
-# 需要先跑过 ./scripts/build.sh 生成 src/natfrpctl/files/natfrpctl-<arch>。
+# 需要先跑过 ./scripts/build.sh 生成 src/luci-app-natfrp/files/natfrpctl-<arch>。
 set -eu
 
 HOST=${HOST:-root@192.168.1.1}
 ARCH=${ARCH:-aarch64}
 root=$(cd "$(dirname "$0")/.." && pwd)
 S="$root/src/luci-app-natfrp"
-BIN="$root/src/natfrpctl/files/natfrpctl-$ARCH"
+# build.sh 的输出目录是 src/luci-app-natfrp/files（不是 src/natfrpctl/files）
+BIN="$S/files/natfrpctl-$ARCH"
 
 [ -f "$BIN" ] || { echo "缺少 $BIN，先运行 ./scripts/build.sh" >&2; exit 1; }
 
@@ -28,6 +29,7 @@ mkdir -p "$stage/usr/bin" \
          "$stage/etc/config" "$stage/etc/init.d"
 
 cp "$BIN"                                                  "$stage/usr/bin/natfrpctl"
+cp "$S/root/usr/bin/natfrpctl-status"                      "$stage/usr/bin/natfrpctl-status"
 cp "$S/root/usr/share/luci/menu.d/luci-app-natfrp.json"     "$stage/usr/share/luci/menu.d/"
 cp "$S/root/usr/share/rpcd/acl.d/luci-app-natfrp.json"      "$stage/usr/share/rpcd/acl.d/"
 cp "$S/htdocs/luci-static/resources/view/natfrp/main.js"    "$stage/www/luci-static/resources/view/natfrp/"
@@ -44,12 +46,12 @@ ssh -o StrictHostKeyChecking=accept-new "$HOST" '
 	      /usr/lib/lua/luci/model/cbi/natfrp.lua
 	rm -rf /usr/lib/lua/luci/view/natfrp
 
-	chown root:root /usr/bin/natfrpctl \
+	chown root:root /usr/bin/natfrpctl /usr/bin/natfrpctl-status \
 		/usr/share/luci/menu.d/luci-app-natfrp.json \
 		/usr/share/rpcd/acl.d/luci-app-natfrp.json \
 		/etc/init.d/natfrp
 	chown -R root:root /www/luci-static/resources/view/natfrp
-	chmod 755 /usr/bin/natfrpctl /etc/init.d/natfrp
+	chmod 755 /usr/bin/natfrpctl /usr/bin/natfrpctl-status /etc/init.d/natfrp
 	chmod 644 /usr/share/luci/menu.d/luci-app-natfrp.json \
 		/usr/share/rpcd/acl.d/luci-app-natfrp.json
 
