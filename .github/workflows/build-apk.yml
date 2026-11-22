@@ -98,7 +98,8 @@ jobs:
           make defconfig
           make package/luci-app-natfrp/compile -j"$(nproc)" V=s
           mkdir -p "$GITHUB_WORKSPACE/out"
-          find bin -name '*.apk' -exec cp -v {} "$GITHUB_WORKSPACE/out/" \;
+          # 只收我们自己的包，别把 SDK 里的 libc/libgcc 一起带上
+          find bin -name 'luci-app-natfrp-*.apk' -exec cp -v {} "$GITHUB_WORKSPACE/out/" \;
           ls -l "$GITHUB_WORKSPACE/out"
 
       - name: 上传产物
