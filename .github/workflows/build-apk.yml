@@ -36,10 +36,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: 使用最新 Node.js
+      - name: 使用 Node LTS
         uses: actions/setup-node@v7
         with:
-          node-version: 'current'
+          # 'current' 每次都可能换成新的大版本，产物不可复现；LTS 足够跑语法检查与自测
+          node-version: 'lts/*'
       - name: 前端语法与兼容层自测
         run: |
           node -v
@@ -64,15 +65,36 @@ jobs:
           strip "../src/luci-app-natfrp/files/natfrpctl-$OWRT_ARCH" || true
           file "../src/luci-app-natfrp/files/natfrpctl-$OWRT_ARCH"
 
-      - name: 准备守护进程二进制
+      - name: 准备守护进程二进制（含完整性校验）
         run: |
           set -euo pipefail
           mkdir -p "src/luci-app-natfrp/files/blobs/$BLOB_ARCH" /tmp/vendor
           ipk="luci-app-natfrp_${BLOB_ARCH}.ipk"
           curl -fsSL -o "/tmp/vendor/$ipk" \
             "https://nya.globalslb.net/natfrp/client/launcher-openwrt/${LAUNCHER_VERSION}/${ipk}"
-          tar -xf "/tmp/vendor/$ipk" -C /tmp/vendor
+
+          # 官方这个 ipk 其实是 gzip 包着 tar（不是标准 ar 归档）。两种形态都兼容，
+          # 免得上游哪天改回 ar 打包就把 CI 弄断。
+          tar -xf "/tmp/vendor/$ipk" -C /tmp/vendor 2>/dev/null \
+            || ( cd /tmp/vendor && ar x "$ipk" )
           tar -xzf /tmp/vendor/data.tar.gz -C /tmp/vendor ./usr/bin
+
+          # 这些二进制会以 root 运行，且同一个 URL 的内容会变（上游重新打包过），
+          # 所以按 scripts/vendor-sha256.txt 逐项校验；没收录的架构只警告、不阻断。
+          for f in natfrp-service natfrp-frpc; do
+            want=$(awk -v k="$BLOB_ARCH/$f" '$1 == k { print $2 }' scripts/vendor-sha256.txt)
+            if [ -z "$want" ]; then
+              echo "::warning::没有固定 $BLOB_ARCH/$f 的 sha256，本次跳过校验；核对后请补进 scripts/vendor-sha256.txt"
+              continue
+            fi
+            got=$(sha256sum "/tmp/vendor/usr/bin/$f" | awk '{print $1}')
+            if [ "$got" != "$want" ]; then
+              echo "::error::$f 校验失败：期望 $want，实际 $got"
+              exit 1
+            fi
+            echo "$f sha256 ok ($got)"
+          done
+
           cp /tmp/vendor/usr/bin/natfrp-service /tmp/vendor/usr/bin/natfrp-frpc \
              "src/luci-app-natfrp/files/blobs/$BLOB_ARCH/"
           ls -l "src/luci-app-natfrp/files/blobs/$BLOB_ARCH"
@@ -128,3 +150,9 @@ jobs:
             apk add --allow-untrusted ./luci-app-natfrp-*.apk
             ```
             安装后到「服务 → SakuraFrp 内网穿透」填写访问密钥。
+
+            **WebUI 默认走 HTTPS**（自签名证书，页面有「下载证书」按钮）。需要明文入口时
+            在页面关闭 TLS，并确认设备装了 `openssl-util`（包依赖已声明）。
+
+            **从官方 3.1.9 升级前请先备份 `/etc/natfrp/config.json`**：官方包的 pre-deinstall
+            会 `rm -rf /etc/natfrp`，而 token 只保存在这个文件里。

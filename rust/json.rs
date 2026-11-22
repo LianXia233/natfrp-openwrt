@@ -33,6 +33,7 @@ impl J {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn i64_of(&self, key: &str) -> Option<i64> {
         match self.get(key) {
             Some(J::Num(n)) => n.parse().ok(),
@@ -280,18 +281,60 @@ impl<'a> P<'a> {
         }
     }
 
+    /// 按 JSON 的 number 语法严格扫描：`-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?`
+    ///
+    /// 以前这里是「见什么收什么」，`1+2`、`.5`、`01` 都会被当成合法数字原样收下。
+    /// 这类脏值再被写回 config.json，守护进程就会整份解析失败（按空配置运行）。
     fn number(&mut self) -> Result<J, String> {
         let start = self.i;
-        while let Some(c) = self.peek() {
-            if matches!(c, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
+
+        if self.peek() == Some(b'-') {
+            self.i += 1;
+        }
+
+        match self.peek() {
+            // 前导零之后不能再跟数字
+            Some(b'0') => {
                 self.i += 1;
-            } else {
-                break;
+                if matches!(self.peek(), Some(b'0'..=b'9')) {
+                    return Err(format!("number with leading zero at byte {}", start));
+                }
+            }
+            Some(b'1'..=b'9') => {
+                while matches!(self.peek(), Some(b'0'..=b'9')) {
+                    self.i += 1;
+                }
+            }
+            _ => return Err(format!("invalid number at byte {}", start)),
+        }
+
+        if self.peek() == Some(b'.') {
+            self.i += 1;
+            let mut digits = 0;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.i += 1;
+                digits += 1;
+            }
+            if digits == 0 {
+                return Err(format!("invalid fraction at byte {}", start));
             }
         }
-        if start == self.i {
-            return Err(format!("unexpected byte at {}", self.i));
+
+        if matches!(self.peek(), Some(b'e') | Some(b'E')) {
+            self.i += 1;
+            if matches!(self.peek(), Some(b'+') | Some(b'-')) {
+                self.i += 1;
+            }
+            let mut digits = 0;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.i += 1;
+                digits += 1;
+            }
+            if digits == 0 {
+                return Err(format!("invalid exponent at byte {}", start));
+            }
         }
+
         let raw = std::str::from_utf8(&self.b[start..self.i])
             .map_err(|_| "invalid number".to_string())?;
         Ok(J::Num(raw.to_string()))
@@ -313,6 +356,16 @@ mod tests {
         // 重新解析自己的输出
         let re = parse(&v.render()).expect("reparse");
         assert_eq!(re, v);
+    }
+
+    #[test]
+    fn rejects_malformed_numbers() {
+        for bad in ["1+2", ".5", "01", "1.", "1e", "-", "1e+", "+1"] {
+            assert!(parse(bad).is_err(), "{} 应被拒绝", bad);
+        }
+        for good in ["0", "-1", "1.5", "1e5", "-2.5E-3"] {
+            assert!(parse(good).is_ok(), "{} 应被接受", good);
+        }
     }
 
     #[test]

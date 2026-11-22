@@ -3,7 +3,7 @@
 		"description": "Grant access to the SakuraFrp launcher configuration",
 		"read": {
 			"file": {
-				"/usr/bin/natfrpctl": [ "exec" ]
+				"/usr/bin/natfrpctl-status": [ "exec" ]
 			},
 			"uci": [ "natfrp" ]
 		},

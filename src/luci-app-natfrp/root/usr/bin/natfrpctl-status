@@ -1,0 +1,15 @@
+#!/bin/sh
+# natfrpctl 的只读入口。
+#
+# rpcd 的 ACL 只能按「文件 + exec」授权，无法区分实参，所以把只读子命令单独包一层：
+# 只读会话只拿到这个脚本的 exec 权限，写操作（apply/secrets/relay）仍然只有写权限会话能用。
+
+case "$1" in
+	status|version|"")
+		exec /usr/bin/natfrpctl "$@"
+		;;
+	*)
+		echo '{"ok":false,"error":"只读入口仅支持 status / version"}'
+		exit 1
+		;;
+esac

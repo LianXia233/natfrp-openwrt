@@ -16,6 +16,11 @@ const OPENSSL_BIN: &str = "/usr/bin/openssl";
 const INJECT_JS: &str = include_str!("inject.js");
 const MAX_HEAD: usize = 64 * 1024;
 
+/// 明文入口自身不做 TLS，解密靠外部 openssl 命令行。
+pub fn openssl_available() -> bool {
+    std::path::Path::new(OPENSSL_BIN).exists()
+}
+
 pub fn serve(bind: &str, upstream: &str) -> Result<(), String> {
     let listener =
         TcpListener::bind(bind).map_err(|e| format!("监听 {} 失败: {}", bind, e))?;
@@ -78,7 +83,7 @@ fn handle(mut client: TcpStream, upstream: &str) {
         return;
     }
 
-    let with_close = force_connection_close(&req);
+    let with_close = sanitize_request(&req);
     if to_up.write_all(&with_close).is_err() {
         let _ = child.kill();
         let _ = child.wait();
@@ -174,7 +179,11 @@ fn read_head(sock: &mut TcpStream, out: &mut Vec<u8>) -> bool {
     }
 }
 
-fn force_connection_close(req: &[u8]) -> Vec<u8> {
+/// 改写出站请求头：
+///   - 强制 `Connection: close`，这样响应一定以 EOF 结束，便于整体改写 body；
+///   - 去掉 `Accept-Encoding`：响应 body 需要注入脚本，若上游压缩过就无法安全改写，
+///     而浏览器默认会带 gzip，原样转发几乎必然拿到压缩后的 HTML。
+fn sanitize_request(req: &[u8]) -> Vec<u8> {
     let text = String::from_utf8_lossy(req);
     let mut idx = match text.find("\r\n\r\n") {
         Some(i) => i,
@@ -184,12 +193,14 @@ fn force_connection_close(req: &[u8]) -> Vec<u8> {
 
     let mut lines: Vec<String> = Vec::new();
     for line in head.split("\r\n") {
-        if line.to_lowercase().starts_with("connection:") {
+        let low = line.to_lowercase();
+        if low.starts_with("connection:") || low.starts_with("accept-encoding:") {
             continue;
         }
         lines.push(line.to_string());
     }
     lines.push("Connection: close".to_string());
+    lines.push("Accept-Encoding: identity".to_string());
 
     let mut out = lines.join("\r\n");
     out.push_str("\r\n\r\n");
@@ -213,6 +224,7 @@ fn rewrite_response(resp: &[u8]) -> Vec<u8> {
     let mut status_ok = false;
     let mut content_type = String::new();
     let mut chunked = false;
+    let mut encoded = false;
     let mut headers: Vec<String> = Vec::new();
 
     for (i, line) in head.split("\r\n").enumerate() {
@@ -221,6 +233,9 @@ fn rewrite_response(resp: &[u8]) -> Vec<u8> {
             status_ok = low.contains(" 200 ");
         } else if low.starts_with("content-type:") {
             content_type = low.clone();
+        } else if low.starts_with("content-encoding:") {
+            // 上游仍然给了压缩响应（例如它忽略了 identity）：不能往压缩流里插脚本
+            encoded = true;
         } else if low.starts_with("transfer-encoding:") && low.contains("chunked") {
             chunked = true;
         } else if low.starts_with("content-length:")
@@ -232,7 +247,7 @@ fn rewrite_response(resp: &[u8]) -> Vec<u8> {
         headers.push(line.to_string());
     }
 
-    let is_html = content_type.contains("text/html");
+    let is_html = content_type.contains("text/html") && !encoded;
 
     let mut final_body: Vec<u8> = if is_html {
         let raw = if chunked { dechunk(body) } else { body.to_vec() };
@@ -349,6 +364,26 @@ mod tests {
     fn decodes_chunked() {
         let body = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         assert_eq!(dechunk(body), b"hello world".to_vec());
+    }
+
+    #[test]
+    fn strips_accept_encoding_and_forces_close() {
+        let req = b"GET / HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip, deflate\r\nConnection: keep-alive\r\n\r\n";
+        let out = String::from_utf8_lossy(&sanitize_request(req)).to_string();
+        assert!(!out.to_lowercase().contains("accept-encoding: gzip"));
+        assert!(out.contains("Accept-Encoding: identity"));
+        assert!(out.contains("Connection: close"));
+        assert!(!out.contains("keep-alive"));
+    }
+
+    #[test]
+    fn leaves_encoded_body_untouched() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\n\r\n\x1f\x8b\x08";
+        let out = rewrite_response(resp);
+        let text = String::from_utf8_lossy(&out);
+        // 压缩流里绝不能插入 <script>，否则页面直接损坏
+        assert!(!text.contains("<script>"));
+        assert!(text.contains("Content-Encoding: gzip"));
     }
 
     #[test]
