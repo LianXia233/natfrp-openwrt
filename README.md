@@ -8,7 +8,7 @@ SakuraFrp 启动器在 OpenWrt 上的集成：**Rust 后端 + 原生 LuCI JS 页
 ## 特性
 
 - **原生菜单注册**：`/usr/share/luci/menu.d` + ACL，不依赖 `luci-compat` 的 Lua 桥
-- **后端 `natfrpctl`**：std-only Rust（无第三方 crate），静态链接，约 450 KB
+- **后端 `natfrpctl`**：std-only Rust（无第三方 crate），静态链接，约 500 KB（aarch64）
   - `status` 运行状态、WebUI/远程管理信息（**不含口令**，只读账号可执行）
   - `secrets` 口令（仅写权限账号可执行，见 `natfrpctl-status` 只读入口）
   - `apply` 把 uci 配置转换成守护进程配置并让服务生效
