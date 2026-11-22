@@ -7,8 +7,8 @@
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-crate="$root/src/natfrpctl/src"
-out="$root/src/natfrpctl/files"
+crate="$root/rust"
+out="$root/src/luci-app-natfrp/files"
 arch=${ARCH:-aarch64}
 
 case "$arch" in

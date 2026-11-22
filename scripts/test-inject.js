@@ -4,7 +4,7 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
 
-const mod = require(path.join(__dirname, '..', 'src', 'natfrpctl', 'src', 'inject.js'));
+const mod = require(path.join(__dirname, '..', 'rust', 'inject.js'));
 const { hmacSha256, sha256, install } = mod;
 
 let cases = 0;

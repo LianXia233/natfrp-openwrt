@@ -6,8 +6,7 @@ target/
 *.ipk
 
 # CI 在构建时生成，不入库
-src/natfrpctl/files/
-src/natfrp-launcher/blobs/
+src/luci-app-natfrp/files/
 
 # 编辑器
 .vscode/

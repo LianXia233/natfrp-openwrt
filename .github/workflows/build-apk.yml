@@ -55,26 +55,27 @@ jobs:
         run: |
           rustc -V
           cargo -V
-          cd src/natfrpctl/src
+          cd rust
           cargo test --locked
           RUSTFLAGS="-C link-self-contained=yes -C linker=rust-lld" \
             cargo build --release --locked --target "$RUST_TARGET"
-          mkdir -p ../files
-          cp "target/$RUST_TARGET/release/natfrpctl" "../files/natfrpctl-$OWRT_ARCH"
-          file "../files/natfrpctl-$OWRT_ARCH"
+          mkdir -p ../src/luci-app-natfrp/files
+          cp "target/$RUST_TARGET/release/natfrpctl" "../src/luci-app-natfrp/files/natfrpctl-$OWRT_ARCH"
+          strip "../src/luci-app-natfrp/files/natfrpctl-$OWRT_ARCH" || true
+          file "../src/luci-app-natfrp/files/natfrpctl-$OWRT_ARCH"
 
       - name: 准备守护进程二进制
         run: |
           set -euo pipefail
-          mkdir -p "src/natfrp-launcher/blobs/$BLOB_ARCH" /tmp/vendor
+          mkdir -p "src/luci-app-natfrp/files/blobs/$BLOB_ARCH" /tmp/vendor
           ipk="luci-app-natfrp_${BLOB_ARCH}.ipk"
           curl -fsSL -o "/tmp/vendor/$ipk" \
             "https://nya.globalslb.net/natfrp/client/launcher-openwrt/${LAUNCHER_VERSION}/${ipk}"
           tar -xf "/tmp/vendor/$ipk" -C /tmp/vendor
           tar -xzf /tmp/vendor/data.tar.gz -C /tmp/vendor ./usr/bin
           cp /tmp/vendor/usr/bin/natfrp-service /tmp/vendor/usr/bin/natfrp-frpc \
-             "src/natfrp-launcher/blobs/$BLOB_ARCH/"
-          ls -l "src/natfrp-launcher/blobs/$BLOB_ARCH"
+             "src/luci-app-natfrp/files/blobs/$BLOB_ARCH/"
+          ls -l "src/luci-app-natfrp/files/blobs/$BLOB_ARCH"
 
       - name: 下载最新 OpenWrt SDK
         run: |
@@ -95,10 +96,7 @@ jobs:
           cd "$SDK_DIR"
           # 先生成 .config，否则 make 会去开交互式 menuconfig（CI 里没有终端）
           make defconfig
-          make package/luci-app-natfrp/compile \
-               package/natfrpctl/compile \
-               package/natfrp-launcher/compile \
-               -j"$(nproc)" V=s
+          make package/luci-app-natfrp/compile -j"$(nproc)" V=s
           mkdir -p "$GITHUB_WORKSPACE/out"
           find bin -name '*.apk' -exec cp -v {} "$GITHUB_WORKSPACE/out/" \;
           ls -l "$GITHUB_WORKSPACE/out"
