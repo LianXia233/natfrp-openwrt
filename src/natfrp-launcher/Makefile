@@ -38,33 +38,26 @@ define Package/natfrp-launcher/description
  预编译二进制，随包分发；对应守护进程不提供源码。
 endef
 
-# 发布包使用的架构名
-ifeq ($(ARCH),aarch64)
-  NATFRP_BLOB_ARCH:=arm64
-else ifeq ($(ARCH),arm)
-  NATFRP_BLOB_ARCH:=armv7
-else ifeq ($(ARCH),x86_64)
-  NATFRP_BLOB_ARCH:=amd64
-else ifeq ($(ARCH),i386)
-  NATFRP_BLOB_ARCH:=386
-else ifeq ($(ARCH),mipsel)
-  NATFRP_BLOB_ARCH:=mipsle
-else ifeq ($(ARCH),mips)
-  NATFRP_BLOB_ARCH:=mips
-else ifeq ($(ARCH),riscv64)
-  NATFRP_BLOB_ARCH:=riscv64
-else
-  NATFRP_BLOB_ARCH:=
-endif
+# 发布包使用的架构名。
+# 用 $(call) 在 install 展开时求值：解析阶段 $(ARCH) 可能还没定义。
+# 参数允许带 ABI 后缀（如 aarch64_cortex-a53），按前缀匹配。
+natfrp_blob_arch = $(strip \
+	$(if $(filter aarch64%,$(1)),arm64,\
+	$(if $(filter arm%,$(1)),armv7,\
+	$(if $(filter x86_64%,$(1)),amd64,\
+	$(if $(filter i386% i686%,$(1)),386,\
+	$(if $(filter mipsel%,$(1)),mipsle,\
+	$(if $(filter mips64el%,$(1)),mips64le,\
+	$(if $(filter mips64%,$(1)),mips64,\
+	$(if $(filter mips%,$(1)),mips,\
+	$(if $(filter riscv64%,$(1)),riscv64,\
+	$(if $(filter loongarch64%,$(1)),loong64,))))))))))))
 
 define Package/natfrp-launcher/install
 	$(INSTALL_DIR) $(1)/usr/bin
-ifneq ($(NATFRP_BLOB_ARCH),)
-	$(INSTALL_BIN) ./blobs/$(NATFRP_BLOB_ARCH)/natfrp-service $(1)/usr/bin/natfrp-service
-	$(INSTALL_BIN) ./blobs/$(NATFRP_BLOB_ARCH)/natfrp-frpc $(1)/usr/bin/natfrp-frpc
-else
-	$(error 未支持的架构 "$(ARCH)"，请自行在 blobs/ 下放置二进制)
-endif
+	$(if $(call natfrp_blob_arch,$(ARCH)),,$(error 未支持的架构 "$(ARCH)"，请在 blobs/ 下放置二进制))
+	$(INSTALL_BIN) ./blobs/$(call natfrp_blob_arch,$(ARCH))/natfrp-service $(1)/usr/bin/natfrp-service
+	$(INSTALL_BIN) ./blobs/$(call natfrp_blob_arch,$(ARCH))/natfrp-frpc $(1)/usr/bin/natfrp-frpc
 endef
 
 $(eval $(call BuildPackage,natfrp-launcher))
