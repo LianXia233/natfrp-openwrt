@@ -93,12 +93,14 @@ jobs:
           set -euo pipefail
           cp -r src/* "$SDK_DIR/package/"
           cd "$SDK_DIR"
+          # 先生成 .config，否则 make 会去开交互式 menuconfig（CI 里没有终端）
+          make defconfig
           make package/luci-app-natfrp/compile \
                package/natfrpctl/compile \
                package/natfrp-launcher/compile \
                -j"$(nproc)" V=s
           mkdir -p "$GITHUB_WORKSPACE/out"
-          find bin/packages -name '*.apk' -exec cp -v {} "$GITHUB_WORKSPACE/out/" \;
+          find bin -name '*.apk' -exec cp -v {} "$GITHUB_WORKSPACE/out/" \;
           ls -l "$GITHUB_WORKSPACE/out"
 
       - name: 上传产物
