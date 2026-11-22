@@ -1,0 +1,14 @@
+{
+	"admin/services/natfrp": {
+		"title": "SakuraFrp 内网穿透",
+		"order": 15,
+		"action": {
+			"type": "view",
+			"path": "natfrp/main"
+		},
+		"depends": {
+			"acl": [ "luci-app-natfrp" ],
+			"uci": { "natfrp": true }
+		}
+	}
+}

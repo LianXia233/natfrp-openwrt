@@ -1,0 +1,20 @@
+[package]
+name = "natfrpctl"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.70"
+description = "SakuraFrp launcher control helper for LuCI"
+license = "MIT"
+
+[[bin]]
+name = "natfrpctl"
+path = "main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

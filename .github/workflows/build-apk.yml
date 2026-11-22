@@ -1,0 +1,109 @@
+name: build-apk
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      openwrt_target:
+        description: 'OpenWrt target/subtarget（决定 SDK 与包架构）'
+        required: false
+        default: 'mediatek/filogic'
+      arch:
+        description: 'OpenWrt ARCH'
+        required: false
+        default: 'aarch64'
+      blob_arch:
+        description: '守护进程二进制对应的架构名（arm64 / armv7 / amd64 ...）'
+        required: false
+        default: 'arm64'
+
+permissions:
+  contents: read
+
+env:
+  TARGET_DIR: ${{ inputs.openwrt_target || 'mediatek/filogic' }}
+  OWRT_ARCH: ${{ inputs.arch || 'aarch64' }}
+  BLOB_ARCH: ${{ inputs.blob_arch || 'arm64' }}
+  RUST_TARGET: aarch64-unknown-linux-musl
+  LAUNCHER_VERSION: 3.1.9
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 使用最新 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'current'
+      - name: 前端语法与兼容层自测
+        run: |
+          node -v
+          node --check src/luci-app-natfrp/htdocs/luci-static/resources/view/natfrp/main.js
+          node scripts/test-inject.js
+
+      - name: 使用最新稳定版 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.RUST_TARGET }}
+
+      - name: 用官方 Rust 工具链编译 natfrpctl
+        run: |
+          rustc -V
+          cargo -V
+          cd src/natfrpctl/src
+          cargo test --locked
+          RUSTFLAGS="-C link-self-contained=yes -C linker=rust-lld" \
+            cargo build --release --locked --target "$RUST_TARGET"
+          mkdir -p ../files
+          cp "target/$RUST_TARGET/release/natfrpctl" "../files/natfrpctl-$OWRT_ARCH"
+          file "../files/natfrpctl-$OWRT_ARCH"
+
+      - name: 准备守护进程二进制
+        run: |
+          set -euo pipefail
+          mkdir -p "src/natfrp-launcher/blobs/$BLOB_ARCH" /tmp/vendor
+          ipk="luci-app-natfrp_${BLOB_ARCH}.ipk"
+          curl -fsSL -o "/tmp/vendor/$ipk" \
+            "https://nya.globalslb.net/natfrp/client/launcher-openwrt/${LAUNCHER_VERSION}/${ipk}"
+          tar -xf "/tmp/vendor/$ipk" -C /tmp/vendor
+          tar -xzf /tmp/vendor/data.tar.gz -C /tmp/vendor ./usr/bin
+          cp /tmp/vendor/usr/bin/natfrp-service /tmp/vendor/usr/bin/natfrp-frpc \
+             "src/natfrp-launcher/blobs/$BLOB_ARCH/"
+          ls -l "src/natfrp-launcher/blobs/$BLOB_ARCH"
+
+      - name: 下载最新 OpenWrt SDK
+        run: |
+          set -euo pipefail
+          base="https://downloads.openwrt.org/snapshots/targets/${TARGET_DIR}/"
+          sdk=$(curl -fsSL "$base" | grep -oE 'openwrt-sdk-[^"]+Linux-x86_64\.tar\.zst' | head -1)
+          test -n "$sdk" || { echo "未找到 SDK 包"; exit 1; }
+          echo "SDK: $sdk"
+          curl -fsSL -o /tmp/sdk.tar.zst "$base$sdk"
+          mkdir -p /opt/sdk
+          tar --zstd -xf /tmp/sdk.tar.zst -C /opt/sdk --strip-components=1
+          echo "SDK_DIR=/opt/sdk" >> "$GITHUB_ENV"
+
+      - name: 编译 APK
+        run: |
+          set -euo pipefail
+          cp -r src/* "$SDK_DIR/package/"
+          cd "$SDK_DIR"
+          make package/luci-app-natfrp/compile \
+               package/natfrpctl/compile \
+               package/natfrp-launcher/compile \
+               -j"$(nproc)" V=s
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          find bin/packages -name '*.apk' -exec cp -v {} "$GITHUB_WORKSPACE/out/" \;
+          ls -l "$GITHUB_WORKSPACE/out"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: natfrp-apk-${{ inputs.arch || 'aarch64' }}
+          path: out/*.apk
+          if-no-files-found: error

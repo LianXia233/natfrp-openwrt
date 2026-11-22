@@ -1,0 +1,9 @@
+config natfrp 'main'
+	option enabled '0'
+	option remote_mgmt '1'
+
+	# WebUI 默认对外（LAN）监听，端口用启动器的常规端口
+	option webui '1'
+	option webui_host '0.0.0.0'
+	option webui_port '4101'
+	option webui_tls '0'

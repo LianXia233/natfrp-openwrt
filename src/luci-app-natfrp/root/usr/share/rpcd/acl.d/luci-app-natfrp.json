@@ -1,0 +1,17 @@
+{
+	"luci-app-natfrp": {
+		"description": "Grant access to the SakuraFrp launcher configuration",
+		"read": {
+			"file": {
+				"/usr/bin/natfrpctl": [ "exec" ]
+			},
+			"uci": [ "natfrp" ]
+		},
+		"write": {
+			"file": {
+				"/usr/bin/natfrpctl": [ "exec" ]
+			},
+			"uci": [ "natfrp" ]
+		}
+	}
+}

@@ -1,0 +1,15 @@
+# 构建产物
+out/
+dist/
+target/
+*.apk
+*.ipk
+
+# CI 在构建时生成，不入库
+src/natfrpctl/files/
+src/natfrp-launcher/blobs/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
