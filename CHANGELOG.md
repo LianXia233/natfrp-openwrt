@@ -3,6 +3,16 @@
 包版本（`luci-app-natfrp`）与后端版本（`natfrpctl`）独立演进。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [Unreleased]
+
+### Changed
+
+- CI 获取守护进程二进制改为「CDN 优先、仓库存档兜底」：`vendor/blobs/` 内置解包后的
+  `natfrp-service` / `natfrp-frpc`，CDN 拉取或解包失败时自动回退，并始终按
+  `scripts/vendor-sha256.txt` 校验；存档损坏或与钉死值不符会直接失败。
+- CI 增加 Cargo 依赖与构建缓存、同一 PR 的旧任务自动取消、任务超时保护，
+  CDN 与 OpenWrt SDK 下载增加重试。
+
 ## [3.2.1] — 2026-11-24
 
 ### Added

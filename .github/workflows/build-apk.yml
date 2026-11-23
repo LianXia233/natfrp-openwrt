@@ -23,6 +23,11 @@ on:
 permissions:
   contents: write
 
+# 同一分支/PR 有新提交时取消旧任务；发布任务不打断
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   TARGET_DIR: ${{ inputs.openwrt_target || 'mediatek/filogic' }}
   OWRT_ARCH: ${{ inputs.arch || 'aarch64' }}
@@ -33,6 +38,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -53,6 +59,17 @@ jobs:
           targets: ${{ env.RUST_TARGET }}
           components: rustfmt
 
+      - name: 缓存 Cargo 依赖与构建产物
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
       - name: Rust 格式检查
         run: cd rust && cargo fmt --all -- --check
 
@@ -69,37 +86,82 @@ jobs:
           strip "../src/luci-app-natfrp/files/natfrpctl-$OWRT_ARCH" || true
           file "../src/luci-app-natfrp/files/natfrpctl-$OWRT_ARCH"
 
-      - name: 准备守护进程二进制（含完整性校验）
+      - name: 校验仓库存档的兜底二进制
         run: |
           set -euo pipefail
-          mkdir -p "src/luci-app-natfrp/files/blobs/$BLOB_ARCH" /tmp/vendor
-          ipk="luci-app-natfrp_${BLOB_ARCH}.ipk"
-          curl -fsSL -o "/tmp/vendor/$ipk" \
-            "https://nya.globalslb.net/natfrp/client/launcher-openwrt/${LAUNCHER_VERSION}/${ipk}"
+          dir="vendor/blobs/$BLOB_ARCH"
+          if [ ! -d "$dir" ]; then
+            echo "::warning::没有 $BLOB_ARCH 的仓库存档，CDN 不可用时无法兜底"
+            exit 0
+          fi
+          for f in natfrp-service natfrp-frpc; do
+            if [ ! -f "$dir/$f" ]; then
+              echo "::error::仓库存档缺少 $dir/$f"
+              exit 1
+            fi
+            want=$(awk -v k="$BLOB_ARCH/$f" '$1 == k { print $2 }' scripts/vendor-sha256.txt)
+            if [ -z "$want" ]; then
+              echo "::warning::没有固定 $BLOB_ARCH/$f 的 sha256，跳过存档校验"
+              continue
+            fi
+            got=$(sha256sum "$dir/$f" | awk '{print $1}')
+            if [ "$got" != "$want" ]; then
+              echo "::error::仓库存档 $f 校验失败：期望 $want，实际 $got"
+              exit 1
+            fi
+            echo "存档 $f sha256 ok ($got)"
+          done
 
-          # 官方这个 ipk 其实是 gzip 包着 tar（不是标准 ar 归档）。两种形态都兼容，
-          # 免得上游哪天改回 ar 打包就把 CI 弄断。
-          tar -xf "/tmp/vendor/$ipk" -C /tmp/vendor 2>/dev/null \
-            || ( cd /tmp/vendor && ar x "$ipk" )
-          tar -xzf /tmp/vendor/data.tar.gz -C /tmp/vendor ./usr/bin
+      - name: 准备守护进程二进制（CDN 优先，仓库存档兜底）
+        run: |
+          set -euo pipefail
+          mkdir -p "src/luci-app-natfrp/files/blobs/$BLOB_ARCH"
+          rm -rf /tmp/vendor
+          mkdir -p /tmp/vendor/extract
+
+          source_kind=cdn
+          fetch_cdn() {
+            ipk="luci-app-natfrp_${BLOB_ARCH}.ipk"
+            curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 15 \
+              -o "/tmp/vendor/$ipk" \
+              "https://nya.globalslb.net/natfrp/client/launcher-openwrt/${LAUNCHER_VERSION}/${ipk}" || return 1
+
+            # 官方这个 ipk 其实是 gzip 包着 tar（不是标准 ar 归档）。两种形态都兼容，
+            # 免得上游哪天改回 ar 打包就把 CI 弄断。
+            if ! tar -xf "/tmp/vendor/$ipk" -C /tmp/vendor/extract 2>/dev/null; then
+              ( cd /tmp/vendor/extract && ar x "/tmp/vendor/$ipk" ) || return 1
+            fi
+            tar -xzf /tmp/vendor/extract/data.tar.gz -C /tmp/vendor/extract ./usr/bin || return 1
+            cp /tmp/vendor/extract/usr/bin/natfrp-service \
+               /tmp/vendor/extract/usr/bin/natfrp-frpc /tmp/vendor/ || return 1
+          }
+          if ! fetch_cdn; then
+            source_kind=archive
+            echo "::warning::CDN 拉取失败，改用仓库存档 vendor/blobs/$BLOB_ARCH"
+            cp "vendor/blobs/$BLOB_ARCH/natfrp-service" \
+               "vendor/blobs/$BLOB_ARCH/natfrp-frpc" /tmp/vendor/
+          fi
+          echo "二进制来源: $source_kind"
 
           # 这些二进制会以 root 运行，且同一个 URL 的内容会变（上游重新打包过），
           # 所以按 scripts/vendor-sha256.txt 逐项校验；没收录的架构只警告、不阻断。
+          # 哈希不一致属于供应链信号，不做兜底，直接失败等人工核对。
           for f in natfrp-service natfrp-frpc; do
             want=$(awk -v k="$BLOB_ARCH/$f" '$1 == k { print $2 }' scripts/vendor-sha256.txt)
             if [ -z "$want" ]; then
               echo "::warning::没有固定 $BLOB_ARCH/$f 的 sha256，本次跳过校验；核对后请补进 scripts/vendor-sha256.txt"
               continue
             fi
-            got=$(sha256sum "/tmp/vendor/usr/bin/$f" | awk '{print $1}')
+            got=$(sha256sum "/tmp/vendor/$f" | awk '{print $1}')
             if [ "$got" != "$want" ]; then
-              echo "::error::$f 校验失败：期望 $want，实际 $got"
+              echo "::error::$f 校验失败（来源 $source_kind）：期望 $want，实际 $got"
+              echo "::error::若上游已重新打包，请人工核对后同步更新 scripts/vendor-sha256.txt 与 vendor/blobs/ 存档"
               exit 1
             fi
             echo "$f sha256 ok ($got)"
           done
 
-          cp /tmp/vendor/usr/bin/natfrp-service /tmp/vendor/usr/bin/natfrp-frpc \
+          cp /tmp/vendor/natfrp-service /tmp/vendor/natfrp-frpc \
              "src/luci-app-natfrp/files/blobs/$BLOB_ARCH/"
           ls -l "src/luci-app-natfrp/files/blobs/$BLOB_ARCH"
 
@@ -107,10 +169,12 @@ jobs:
         run: |
           set -euo pipefail
           base="https://downloads.openwrt.org/snapshots/targets/${TARGET_DIR}/"
-          sdk=$(curl -fsSL "$base" | grep -oE 'openwrt-sdk-[^"]+Linux-x86_64\.tar\.zst' | head -1)
+          sdk=$(curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 15 "$base" \
+            | grep -oE 'openwrt-sdk-[^"]+Linux-x86_64\.tar\.zst' | head -1)
           test -n "$sdk" || { echo "未找到 SDK 包"; exit 1; }
           echo "SDK: $sdk"
-          curl -fsSL -o /tmp/sdk.tar.zst "$base$sdk"
+          curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 15 \
+            -o /tmp/sdk.tar.zst "$base$sdk"
           mkdir -p /opt/sdk
           tar --zstd -xf /tmp/sdk.tar.zst -C /opt/sdk --strip-components=1
           echo "SDK_DIR=/opt/sdk" >> "$GITHUB_ENV"
