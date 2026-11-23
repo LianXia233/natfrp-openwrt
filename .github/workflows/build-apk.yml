@@ -51,6 +51,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.RUST_TARGET }}
+          components: rustfmt
+
+      - name: Rust 格式检查
+        run: cd rust && cargo fmt --all -- --check
 
       - name: 用官方 Rust 工具链编译 natfrpctl
         run: |
