@@ -422,7 +422,7 @@ rm -rf /etc/natfrp /etc/natfrp-config.snapshot /etc/config/natfrp
 
 - **WebUI 内嵌隧道编辑受限**：启动器自带 WebUI 的「新建/编辑隧道」功能内嵌了官方页面 `https://www.natfrp.com/_launcher/create-tunnel`。由于上游设置的 HTTP `frame-ancestors` 响应头仅允许 `'self'` 与 `https://launcher.natfrp.com`，局域网直接以 IP 访问时会被现代浏览器的安全策略拦截。建议直接在 [SakuraFrp 控制台](https://www.natfrp.com) 或通过远程管理页管理和修改隧道。
 - **远程管理认证方式**：当前远程管理通过基于 nonce 的加密挑战认证；上游虽支持 TOTP 二次验证，但目前本包 LuCI 页面暂未引入 TOTP 输入界面。
-- **目标架构与发行计划**：当前官方 CI 发布构建固定面向 `aarch64_cortex-a53`；其他架构（如 x86_64、mips32 等）需自行调整 SDK 目标与 blob 后重新打包。
+- **目标架构与发行计划**：当前官方 CI 发布构建固定面向 `aarch64_cortex-a53`；其他架构（如 x86_64、mips32 等）需自行调整 SDK 目标与 blob 后重新打包（仓库内的兜底存档目前也只覆盖 `arm64`）。
 - **明文 Relay 性能开销**：当选择关闭 TLS 开启明文 Relay 时，底层采用每连接调用 `openssl s_client` 终止回环加密。虽已内置 32 并发连接上限与 15 秒超时保护，但在极端低算力设备上高频请求仍会有一定 CPU 开销，日常推荐使用原生 TLS 模式。
 - **上游二进制黑盒**：官方守护进程及 `frpc` 均为闭源静态二进制，本仓库未做任何逆向或字节级改写，仅按 SHA-256 完整性约束引入。
 
@@ -434,7 +434,7 @@ rm -rf /etc/natfrp /etc/natfrp-config.snapshot /etc/config/natfrp
 - **短暂进程命令行暴露**：执行 `set-token` 与 `remote-kdf` 时，参数会通过 CLI 传递，在毫秒级执行瞬间可能在 `/proc/<pid>/cmdline` 中留下瞬态痕迹。路由器为单用户嵌入式场景时无安全影响，多用户共享系统请知悉。
 - **上游 KDF 特性防范**：远程管理密钥在官方协议中使用 `PBKDF2-HMAC-SHA256`（固定 Salt + 10,000 次迭代），计算代价相对较低。为此本项目将「允许远程修改配置」与「允许远程触发更新」**默认置为关闭**；强烈建议配置长且复杂的强口令并定期更换。
 - **WebUI 访问 Token 泄露防御**：启动器 Web 控制通道会将 `webui_pass` 携带在 URL 查询参数中。请务必在 TLS 加密连接下或完全可信的局域网内访问，避免在公网反代明文链路中暴露。
-- **供应链固化校验**：所有从官方 CDN 拉取的外部预编译二进制均在 CI 中按 SHA-256 逐项校验（见 `scripts/vendor-sha256.txt`），严防 CDN 劫持或上游构建被污染。
+- **供应链固化校验**：所有外部预编译二进制均在 CI 中按 SHA-256 逐项校验（见 `scripts/vendor-sha256.txt`），严防 CDN 劫持或上游构建被污染；正常构建优先从官方 CDN 拉取，拉取或解包失败时自动回退到仓库内 `vendor/blobs/` 的解包存档（存档同样强制校验哈希），避免上游失效导致无法出包。
 
 ---
 
@@ -445,7 +445,7 @@ rm -rf /etc/natfrp /etc/natfrp-config.snapshot /etc/config/natfrp
 每次代码推送均会触发 GitHub Actions 严苛的自动化流水线：
 1. **Node LTS 环境检测**：执行 `node --check` 语法静态扫描与 `scripts/test-inject.js` 兼容层单元测试（含 61 组 WebCrypto 测试向量）。
 2. **Rust 官方工具链**：执行 `cargo fmt --check` 格式审查、`cargo test` 单元测试，并通过 `aarch64-unknown-linux-musl` 交叉编译全静态二进制。
-3. **上游供应链校验**：从官方 CDN 拉取二进制，逐一比对 `scripts/vendor-sha256.txt` 固化哈希。
+3. **上游供应链校验**：优先从官方 CDN 拉取二进制，逐一比对 `scripts/vendor-sha256.txt` 固化哈希；CDN 拉取或解包失败时自动改用 `vendor/blobs/` 内的解包存档兜底，存档同样强制校验。
 4. **OpenWrt 官方 SDK 打包**：通过 OpenWrt 官方 Snapshot SDK 构建标准 APK 包并发布 Release。
 
 ### 本地快速调试与二次开发
@@ -484,6 +484,8 @@ HOST=root@192.168.1.1 ./scripts/deploy.sh
 │   ├── deploy.sh                    # 路由器设备直推免打包热调试脚本
 │   ├── test-inject.js               # WebCrypto 垫片 61 组算法测试套件
 │   └── vendor-sha256.txt            # 官方守护进程与 frpc 二进制 SHA-256 钉死基线
+├── vendor/
+│   └── blobs/arm64/                 # 上游解包二进制应急存档（CDN 失效时兜底）
 ├── CHANGELOG.md                     # 详细版本迭代更新日志
 ├── LICENSE                          # 许可证文件
 └── README.md                        # 项目主文档
