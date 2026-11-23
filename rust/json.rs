@@ -116,7 +116,10 @@ fn emit_str(s: &str, out: &mut String) {
 }
 
 pub fn parse(text: &str) -> Result<J, String> {
-    let mut p = P { b: text.as_bytes(), i: 0 };
+    let mut p = P {
+        b: text.as_bytes(),
+        i: 0,
+    };
     p.skip_ws();
     let v = p.value()?;
     p.skip_ws();
@@ -238,7 +241,9 @@ impl<'a> P<'a> {
         self.i += 1;
         let mut out = String::new();
         loop {
-            let c = self.peek().ok_or_else(|| "unterminated string".to_string())?;
+            let c = self
+                .peek()
+                .ok_or_else(|| "unterminated string".to_string())?;
             self.i += 1;
             match c {
                 b'"' => return Ok(out),

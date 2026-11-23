@@ -10,32 +10,81 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 const OPENSSL_BIN: &str = "/usr/bin/openssl";
 const INJECT_JS: &str = include_str!("inject.js");
 const MAX_HEAD: usize = 64 * 1024;
+/// 明文入口暴露在 LAN 上，必须有上限：每连接一个线程 + 一条 openssl 进程
+const MAX_CONNS: usize = 32;
+const IO_TIMEOUT: Duration = Duration::from_secs(15);
+
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// 连接配额，Drop 时归还
+struct Slot;
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// 明文入口自身不做 TLS，解密靠外部 openssl 命令行。
 pub fn openssl_available() -> bool {
-    std::path::Path::new(OPENSSL_BIN).exists()
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(OPENSSL_BIN)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        std::path::Path::new(OPENSSL_BIN).exists()
+    }
 }
 
 pub fn serve(bind: &str, upstream: &str) -> Result<(), String> {
-    let listener =
-        TcpListener::bind(bind).map_err(|e| format!("监听 {} 失败: {}", bind, e))?;
+    let listener = TcpListener::bind(bind).map_err(|e| format!("监听 {} 失败: {}", bind, e))?;
 
     for conn in listener.incoming() {
-        if let Ok(stream) = conn {
-            let up = upstream.to_string();
-            thread::spawn(move || handle(stream, &up));
+        let stream = match conn {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        if ACTIVE.fetch_add(1, Ordering::Relaxed) >= MAX_CONNS {
+            ACTIVE.fetch_sub(1, Ordering::Relaxed);
+            reject(stream);
+            continue;
         }
+
+        let up = upstream.to_string();
+        thread::spawn(move || {
+            let _slot = Slot;
+            handle(stream, &up);
+        });
     }
 
     Ok(())
 }
 
+/// 超出并发上限时明确回 503，而不是静默断开
+fn reject(mut stream: TcpStream) {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.write_all(
+        b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    );
+    let _ = stream.flush();
+}
+
 fn handle(mut client: TcpStream, upstream: &str) {
+    let _ = client.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = client.set_write_timeout(Some(IO_TIMEOUT));
+
     let mut child = match Command::new(OPENSSL_BIN)
         .args([
             "s_client",
@@ -79,6 +128,8 @@ fn handle(mut client: TcpStream, upstream: &str) {
     let lower = String::from_utf8_lossy(&req).to_lowercase();
 
     if lower.contains("upgrade: websocket") {
+        // WebSocket 是长连接，不能沿用请求头的超时
+        let _ = client.set_read_timeout(None);
         relay_websocket(client, req, to_up, from_up, child);
         return;
     }
@@ -90,6 +141,27 @@ fn handle(mut client: TcpStream, upstream: &str) {
         return;
     }
     let _ = to_up.flush();
+
+    // 带正文的请求：把剩余 body 继续泵给上游（以前只转发首块，大 body 会被截断）
+    if lower.contains("content-length:") || lower.contains("transfer-encoding:") {
+        if let Ok(mut reader) = client.try_clone() {
+            thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if to_up.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = to_up.flush();
+            });
+        }
+    }
 
     let mut resp = Vec::new();
     let _ = from_up.read_to_end(&mut resp);
@@ -158,6 +230,8 @@ fn relay_websocket(
     let _ = client.flush();
     let _ = child.kill();
     let _ = child.wait();
+    // 关闭两端，唤醒仍在 read 的转发线程（WS 是长连接，读超时已被关掉）
+    let _ = client.shutdown(std::net::Shutdown::Both);
     let _ = up_thread.join();
 }
 
@@ -250,7 +324,11 @@ fn rewrite_response(resp: &[u8]) -> Vec<u8> {
     let is_html = content_type.contains("text/html") && !encoded;
 
     let mut final_body: Vec<u8> = if is_html {
-        let raw = if chunked { dechunk(body) } else { body.to_vec() };
+        let raw = if chunked {
+            dechunk(body)
+        } else {
+            body.to_vec()
+        };
         inject(&raw)
     } else {
         body.to_vec()
@@ -312,8 +390,10 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
             None => break,
         };
         let size_str = String::from_utf8_lossy(&body[i..line_end]);
-        let size = match usize::from_str_radix(size_str.trim().split(';').next().unwrap_or("0").trim(), 16)
-        {
+        let size = match usize::from_str_radix(
+            size_str.trim().split(';').next().unwrap_or("0").trim(),
+            16,
+        ) {
             Ok(s) => s,
             Err(_) => break,
         };
@@ -392,7 +472,10 @@ mod tests {
         let out = rewrite_response(resp);
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("Connection: close"));
-        assert!(text.contains(&format!("Content-Length: {}", out.len() - text.find("\r\n\r\n").unwrap() - 4)));
+        assert!(text.contains(&format!(
+            "Content-Length: {}",
+            out.len() - text.find("\r\n\r\n").unwrap() - 4
+        )));
         assert!(text.contains("<script>"));
     }
 }

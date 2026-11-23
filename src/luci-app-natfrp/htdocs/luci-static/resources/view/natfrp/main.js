@@ -96,8 +96,8 @@ function readSecrets(attempt) {
 	});
 }
 
-function applySettings() {
-	return fs.exec(CTL, [ 'apply' ]).then(function (res) {
+function applySettings(forceRestart) {
+	return fs.exec(CTL, forceRestart ? [ 'apply', '--restart' ] : [ 'apply' ]).then(function (res) {
 		var data = parseJson(res ? String(res.stdout || '').trim() : '');
 		if (!data || data.ok !== true)
 			throw new Error((data && data.error) || _('守护进程没有接受这次配置'));
@@ -165,6 +165,7 @@ return view.extend({
 	render: function (data) {
 		var status = (data && data[0]) || null;
 		var secrets = this.secrets || null;
+		var view = this;
 		var m, s, o;
 
 		this.badgeEl = null;
@@ -184,10 +185,17 @@ return view.extend({
 		o.default = '0';
 
 		o = s.option(form.Value, 'token', _('访问密钥'),
-			_('在服务端控制台的访问密钥页面获取。留空表示保持现有密钥不变。'));
+			_('在服务端控制台的访问密钥页面获取。留空表示保持现有密钥不变。') +
+			'<br/>' + _('密钥直接写入 /etc/natfrp/config.json，不经过 uci。'));
 		o.password = true;
 		o.rmempty = true;
 		o.placeholder = _('留空则不修改');
+		/* 不写 uci：否则密钥会在保存到 apply 之间以明文留在 /etc/config/natfrp，
+		   而只读 LuCI 账号对 natfrp 有 uci 读权限。改为保存时调用 natfrpctl set-token。 */
+		o.cfgvalue = function () { return ''; };
+		o.write = function (section_id, value) {
+			view.pendingToken = (value || '').trim();
+		};
 
 		o = s.option(form.Flag, 'remote_mgmt', _('启用远程管理'),
 			_('允许在服务端网页远程操作路由器上的启动器。'));
@@ -207,15 +215,15 @@ return view.extend({
 		};
 
 		o = s.option(form.Flag, 'remote_allow_config', _('允许远程修改配置'),
-			_('远程管理连接建立后，是否允许从服务端网页改写本机启动器配置。关掉更安全。'));
+			_('远程管理连接建立后，是否允许从服务端网页改写本机启动器配置。默认关闭；上游 E2E 密钥派生较弱，开启后请确保密码足够强。'));
 		o.rmempty = false;
-		o.default = '1';
+		o.default = '0';
 		o.depends('remote_mgmt', '1');
 
 		o = s.option(form.Flag, 'remote_allow_update', _('允许远程触发更新'),
-			_('远程管理连接建立后，是否允许从服务端网页触发本机启动器更新。关掉更安全。'));
+			_('远程管理连接建立后，是否允许从服务端网页触发本机启动器更新。默认关闭。'));
 		o.rmempty = false;
-		o.default = '1';
+		o.default = '0';
 		o.depends('remote_mgmt', '1');
 
 		o = s.option(form.Flag, 'webui', _('启用 WebUI'),
@@ -429,8 +437,14 @@ return view.extend({
 		var password = (sec && sec.webui_pass) || '';
 		var webuiReady = !!(webui.enabled && port > 0);
 		var remoteReady = !!(remote.enabled && remote.keyed);
+
+		/* IPv6 字面量必须加方括号才能拼成合法 URL */
+		var hostPart = window.location.hostname;
+		if (hostPart.indexOf(':') >= 0 && hostPart.charAt(0) !== '[')
+			hostPart = '[' + hostPart + ']';
+
 		var localUrl = webuiReady
-			? ((webui.tls === false ? 'http' : 'https') + '://' + window.location.hostname + ':' + port + '/')
+			? ((webui.tls === false ? 'http' : 'https') + '://' + hostPart + ':' + port + '/')
 			: null;
 
 		if (running)
@@ -451,8 +465,11 @@ return view.extend({
 			this.cfgErrEl.textContent = '';
 		}
 
+		/* 拿不到口令可能是权限不足，也可能是 config.json 损坏，提示要区分 */
+		var secretsHint = (st && st.config_error) ? _('配置文件读取失败') : _('需要写权限');
+
 		if (!secretsOk)
-			this.passEl.textContent = _('需要写权限');
+			this.passEl.textContent = secretsHint;
 		else
 			this.passEl.textContent = password || _('未设置');
 
@@ -485,13 +502,14 @@ return view.extend({
 			this.hintEl.textContent = (running
 				? _('跳到 natfrp 远程管理页，用下方的远程管理密码连接。')
 				: _('启动器未运行，远程管理需要服务在线。'))
+				+ ' ' + _('认证方式：%s。').format(remote.auth_mode || 'nonce')
 				+ (caps.length ? ' ' + _('当前已限制：%s。').format(caps.join('、')) : '');
 		}
 		else if (webuiReady) {
 			this.hintEl.textContent = running
 				? ((webui.tls === false)
 					? _('明文 HTTP，口令不加密，请在可信内网使用。')
-					: _('自签名证书，下载后导入信任即不再提示。'))
+					: _('证书已覆盖本机地址（SAN）且有效期 825 天；导入后桌面与 Android 浏览器不再提示，iOS 还需在「关于本机 → 证书信任设置」里启用完全信任。'))
 				: _('服务已停止，WebUI 可能无法连接。');
 		}
 		else {
@@ -503,12 +521,12 @@ return view.extend({
 		else
 			this.copyBtn.setAttribute('disabled', 'disabled');
 
-		this.certBtn.style.display = webuiReady ? '' : 'none';
+		this.certBtn.style.display = (webuiReady && webui.tls !== false) ? '' : 'none';
 
 		this.remoteRow.style.display = remote.enabled ? '' : 'none';
 		this.remotePassEl.textContent = secretsOk
 			? ((sec && sec.remote_pass) || _('未保存'))
-			: _('需要写权限');
+			: secretsHint;
 		if (secretsOk && sec && sec.remote_pass)
 			this.remoteCopyBtn.removeAttribute('disabled');
 		else
@@ -540,12 +558,35 @@ return view.extend({
 	 * natfrpctl apply 打断，导致开关状态和守护进程配置对不上。
 	 */
 	handleSaveApply: function (ev) {
+		var self = this;
+		this.pendingToken = null;
+
 		return this.handleSave(ev).then(function () {
 			return uci.apply();
 		}).then(function () {
-			return applySettings();
-		}).then(function () {
-			window.location.reload();
+			/* 访问密钥不走 uci：保存后立刻写进 config.json */
+			var tok = self.pendingToken;
+			self.pendingToken = null;
+			if (!tok)
+				return null;
+
+			return fs.exec(CTL, [ 'set-token', tok ]).then(function (res) {
+				var data = parseJson(res ? String(res.stdout || '').trim() : '');
+				if (!data || data.ok !== true)
+					throw new Error((data && data.error) || _('访问密钥保存失败'));
+				return data;
+			});
+		}).then(function (tokenRes) {
+			/* 只改 token 时配置内容前后一致，必须要求 apply 强制重载 */
+			return applySettings(!!tokenRes);
+		}).then(function (res) {
+			var restarted = !!(res && res.restarted);
+			ui.addNotification(null, E('p', restarted
+				? _('配置已应用，服务已重启。')
+				: _('配置已更新。')), 'info');
+
+			/* 留一点时间让提示可见，再刷新页面读取新状态 */
+			setTimeout(function () { window.location.reload(); }, 700);
 		}).catch(function (err) {
 			ui.addNotification(null,
 				E('p', _('应用配置失败：%s').format(err && err.message ? err.message : err)), 'error');

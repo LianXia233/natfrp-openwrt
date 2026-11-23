@@ -15,8 +15,13 @@ use std::path::Path;
 
 pub const DIR: &str = "/etc/natfrp";
 pub const PATH: &str = "/etc/natfrp/config.json";
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub const BAK_PATH: &str = "/etc/natfrp/config.json.bak";
+
+/// 配置快照。**故意放在 `/etc/natfrp` 之外**：官方包的 pre-deinstall 是
+/// `rm -rf /etc/natfrp`，升级/卸载时会把 token 与口令一起抹掉；快照留在外面，
+/// 由 postinst 调 `natfrpctl restore` 恢复。
+pub const SNAPSHOT_PATH: &str = "/etc/natfrp-config.snapshot";
 
 /// 备份文件路径：`<主文件>.bak`。守护进程自己也用这个后缀，互相兼容。
 fn bak_of(path: &str) -> String {
@@ -78,11 +83,36 @@ fn recover(path: &str, why: &str) -> Result<J, String> {
 
 /// 原子写入（先写临时文件再 rename），并按 0600 收权限。
 /// 覆盖前先留一份 `.bak`，供下次损坏时恢复。
+///
+/// 写主配置成功后会把同一份内容镜像到 [`SNAPSHOT_PATH`]，供 `restore` 在
+/// 升级（官方包会 `rm -rf /etc/natfrp`）或误删时恢复。镜像失败只告警。
 pub fn save(doc: &J) -> Result<(), String> {
     save_to(PATH, doc)
 }
 
 pub fn save_to(path: &str, doc: &J) -> Result<(), String> {
+    // 备份：只在现有文件可解析时留，避免把坏内容固化成「好备份」
+    if let Ok(text) = fs::read_to_string(path) {
+        if json::parse(&text).is_ok() {
+            let _ = fs::copy(path, bak_of(path));
+        }
+    }
+
+    let body = doc.render() + "\n";
+    write_atomic(path, &body)?;
+
+    if path == PATH {
+        if let Err(e) = write_atomic(SNAPSHOT_PATH, &body) {
+            crate::sh::log(
+                "warning",
+                &format!("写入配置快照 {} 失败: {}", SNAPSHOT_PATH, e),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn write_atomic(path: &str, body: &str) -> Result<(), String> {
     let dir = match Path::new(path).parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => Path::new(DIR).to_path_buf(),
@@ -91,19 +121,39 @@ pub fn save_to(path: &str, doc: &J) -> Result<(), String> {
         fs::create_dir_all(&dir).map_err(|e| format!("创建 {} 失败: {}", dir.display(), e))?;
     }
 
-    // 备份：只在现有文件可解析时留，避免把坏内容固化成「好备份」
-    if let Ok(text) = fs::read_to_string(path) {
-        if json::parse(&text).is_ok() {
-            let _ = fs::copy(path, bak_of(path));
-        }
-    }
-
     let tmp = format!("{}.tmp", path);
-    let body = doc.render() + "\n";
     fs::write(&tmp, body.as_bytes()).map_err(|e| format!("写入 {} 失败: {}", tmp, e))?;
     set_mode(&tmp, 0o600);
     fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {}", path, e))?;
     Ok(())
+}
+
+/// 配置不存在时从快照恢复（升级/误删）。存在则不做任何事，返回是否恢复。
+pub fn restore_if_missing() -> Result<bool, String> {
+    restore_from(PATH, SNAPSHOT_PATH)
+}
+
+pub fn restore_from(path: &str, snapshot: &str) -> Result<bool, String> {
+    if Path::new(path).exists() {
+        return Ok(false);
+    }
+
+    let text = match fs::read_to_string(snapshot) {
+        Ok(t) => t,
+        // 没有快照＝全新安装，属于正常情况
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("读取快照 {} 失败: {}", snapshot, e)),
+    };
+
+    let doc =
+        json::parse(&text).map_err(|e| format!("快照 {} 无法解析（{}），未恢复", snapshot, e))?;
+
+    save_to(path, &doc)?;
+    crate::sh::log(
+        "warning",
+        &format!("{} 不存在，已从快照 {} 恢复", path, snapshot),
+    );
+    Ok(true)
 }
 
 #[cfg(unix)]
@@ -170,8 +220,16 @@ mod tests {
     fn save_keeps_a_parsable_backup() {
         let d = tmpdir("save");
         let p = d.join("config.json");
-        save_to(p.to_str().unwrap(), &json::parse(r#"{"token":"T1"}"#).unwrap()).unwrap();
-        save_to(p.to_str().unwrap(), &json::parse(r#"{"token":"T2"}"#).unwrap()).unwrap();
+        save_to(
+            p.to_str().unwrap(),
+            &json::parse(r#"{"token":"T1"}"#).unwrap(),
+        )
+        .unwrap();
+        save_to(
+            p.to_str().unwrap(),
+            &json::parse(r#"{"token":"T2"}"#).unwrap(),
+        )
+        .unwrap();
 
         let bak = fs::read_to_string(format!("{}.bak", p.display())).unwrap();
         assert_eq!(json::parse(&bak).unwrap().str_of("token"), Some("T1"));
@@ -187,7 +245,41 @@ mod tests {
         write!(f, "{{broken").unwrap();
         drop(f);
 
-        save_to(p.to_str().unwrap(), &json::parse(r#"{"token":"T"}"#).unwrap()).unwrap();
+        save_to(
+            p.to_str().unwrap(),
+            &json::parse(r#"{"token":"T"}"#).unwrap(),
+        )
+        .unwrap();
         assert!(!Path::new(&format!("{}.bak", p.display())).exists());
+    }
+
+    #[test]
+    fn restore_only_when_missing() {
+        let d = tmpdir("restore");
+        let p = d.join("config.json");
+        let snap = d.join("config.json.snapshot");
+        fs::write(&snap, r#"{"token":"SECRET"}"#).unwrap();
+
+        // 主文件存在时不做任何事
+        fs::write(&p, r#"{"token":"NEW"}"#).unwrap();
+        assert!(!restore_from(p.to_str().unwrap(), snap.to_str().unwrap()).unwrap());
+
+        // 主文件被删（升级时官方 pre-deinstall 会这么做）→ 从快照恢复
+        fs::remove_file(&p).unwrap();
+        assert!(restore_from(p.to_str().unwrap(), snap.to_str().unwrap()).unwrap());
+        let doc = load_from(p.to_str().unwrap()).unwrap();
+        assert_eq!(doc.str_of("token"), Some("SECRET"));
+    }
+
+    #[test]
+    fn restore_ignores_missing_or_broken_snapshot() {
+        let d = tmpdir("restore-broken");
+        let p = d.join("config.json");
+        let snap = d.join("snap");
+
+        assert!(!restore_from(p.to_str().unwrap(), snap.to_str().unwrap()).unwrap());
+        fs::write(&snap, "{broken").unwrap();
+        assert!(restore_from(p.to_str().unwrap(), snap.to_str().unwrap()).is_err());
+        assert!(!p.exists());
     }
 }

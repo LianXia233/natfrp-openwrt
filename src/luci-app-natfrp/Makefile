@@ -14,7 +14,7 @@ PKG_NAME:=luci-app-natfrp
 PKG_VERSION:=3.2.0
 PKG_RELEASE:=1
 
-PKG_LICENSE:=MIT
+PKG_LICENSE:=MIT AGPL-3.0-only
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 
 include $(INCLUDE_DIR)/package.mk
@@ -45,10 +45,15 @@ define Package/luci-app-natfrp/conffiles
 /etc/config/natfrp
 endef
 
-# 首次安装 / 升级后清掉 LuCI 缓存并让 rpcd 重新加载 ACL，
-# 否则菜单与权限要等一次重启或重新登录才生效。
+# 首次安装 / del+add 升级后：
+#   1. 配置可能被旧包的 pre-deinstall（rm -rf /etc/natfrp）删掉，先按快照恢复；
+#   2. 清 LuCI 缓存并让 rpcd 重新加载 ACL，否则菜单与权限要等重启或重新登录。
 define Package/luci-app-natfrp/postinst
 #!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+/usr/bin/natfrpctl restore >/dev/null 2>&1 || true
+# del+add 升级后服务处于停止状态；之前启用过就顺手拉起来（内部会重新 render）
+[ -x /etc/rc.d/S90natfrp ] && /etc/init.d/natfrp start >/dev/null 2>&1 || true
 rm -f /tmp/luci-indexcache.* 2>/dev/null
 rm -rf /tmp/luci-modulecache 2>/dev/null
 /etc/init.d/rpcd restart >/dev/null 2>&1 || true
