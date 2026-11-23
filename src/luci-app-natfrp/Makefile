@@ -11,7 +11,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-natfrp
-PKG_VERSION:=3.2.0
+PKG_VERSION:=3.2.1
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT AGPL-3.0-only
