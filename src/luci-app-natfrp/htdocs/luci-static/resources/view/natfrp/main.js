@@ -76,12 +76,23 @@ function readStatus() {
  * 口令单独取：status 不返回明文，只读会话拿不到 secrets，此时页面隐藏口令而不是报错。
  * 返回值：{ webui_pass, remote_pass }，无权限或失败时为 null。
  */
-function readSecrets() {
+function readSecrets(attempt) {
+	var n = attempt || 0;
+
+	/* 首次打开页面时 rpcd 可能还没准备好，失败一次再重试，避免误显示“需要写权限” */
+	var retry = function () {
+		return (n < 1)
+			? new Promise(function (r) { setTimeout(r, 700); }).then(function () { return readSecrets(n + 1); })
+			: null;
+	};
+
 	return fs.exec(CTL, [ 'secrets' ]).then(function (res) {
 		var data = parseJson(res ? String(res.stdout || '').trim() : '');
-		return (data && data.ok === true) ? data : null;
+		if (data && data.ok === true)
+			return data;
+		return retry();
 	}).catch(function () {
-		return null;
+		return retry();
 	});
 }
 
@@ -148,12 +159,12 @@ function copyText(text) {
 
 return view.extend({
 	load: function () {
-		return Promise.all([ readStatus(), readSecrets(), uci.load('natfrp') ]);
+		return Promise.all([ readStatus(), uci.load('natfrp') ]);
 	},
 
 	render: function (data) {
 		var status = (data && data[0]) || null;
-		var secrets = (data && data[1]) || null;
+		var secrets = this.secrets || null;
 		var m, s, o;
 
 		this.badgeEl = null;
@@ -278,6 +289,9 @@ return view.extend({
 		this.updateCard(status, secrets);
 
 		var self = this;
+		/* 口令单独取：拿到后缓存，轮询时继续复用，避免每轮都 fork 进程 */
+		this.loadSecrets();
+
 		poll.add(function () {
 			return self.refresh();
 		}, POLL_INTERVAL);
@@ -401,6 +415,8 @@ return view.extend({
 	},
 
 	updateCard: function (st, sec) {
+		if (st)
+			this.lastStatus = st;
 		if (!this.heroEl)
 			return;
 
@@ -498,10 +514,22 @@ return view.extend({
 		else
 			this.remoteCopyBtn.setAttribute('disabled', 'disabled');
 	},
+	/* 只在口令尚未取到或明确需要刷新时调用 */
+	loadSecrets: function () {
+		var self = this;
+		return readSecrets().then(function (sec) {
+			self.secrets = sec;
+			if (self.lastStatus)
+				self.updateCard(self.lastStatus, sec);
+			return sec;
+		});
+	},
+
 	refresh: function () {
 		var self = this;
 		return readStatus().then(function (st) {
-			self.updateCard(st);
+			self.lastStatus = st;
+			self.updateCard(st, self.secrets);
 			return st;
 		});
 	},
